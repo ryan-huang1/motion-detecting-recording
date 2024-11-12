@@ -6,7 +6,8 @@ import os
 # Parameters
 SENSITIVITY_THRESHOLD = 300  # Lower value increases sensitivity
 MOTION_BUFFER_DURATION = 1.0  # Minimum duration (in seconds) to keep "motion detected" state
-frame_width, frame_height = 640, 480
+frame_width, frame_height = 640, 480  # Capture resolution
+motion_frame_width, motion_frame_height = 320, 240  # Resolution for motion detection
 fps = 20
 record_duration_after_motion = 10  # seconds
 output_folder = "motion_videos"  # Folder to save videos
@@ -21,7 +22,7 @@ motion_end_time = None
 motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
 output_file = None
 
-# Initialize Video Capture (use 0 for Pi camera)
+# Initialize Video Capture (use 0 for default camera)
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
@@ -29,16 +30,8 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
 # Define codec and create VideoWriter object for MP4
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-# Initialize variables for motion detection
-ret, previous_frame = cap.read()
-if not ret:
-    print("Failed to grab initial frame.")
-    cap.release()
-    cv2.destroyAllWindows()
-    exit()
-
-previous_frame = cv2.cvtColor(previous_frame, cv2.COLOR_BGR2GRAY)
-previous_frame = cv2.GaussianBlur(previous_frame, (21, 21), 0)
+# Create background subtractor
+fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
 
 # Main loop
 while True:
@@ -47,13 +40,14 @@ while True:
         print("Failed to grab frame.")
         break
 
-    # Motion detection
-    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray_frame = cv2.GaussianBlur(gray_frame, (21, 21), 0)
-    frame_delta = cv2.absdiff(previous_frame, gray_frame)
-    thresh = cv2.threshold(frame_delta, 20, 255, cv2.THRESH_BINARY)[1]
-    thresh = cv2.dilate(thresh, None, iterations=2)
-    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Resize frame for motion detection to reduce computation
+    motion_frame = cv2.resize(frame, (motion_frame_width, motion_frame_height))
+
+    # Apply background subtraction
+    fgmask = fgbg.apply(motion_frame)
+
+    # Find contours
+    contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # Determine if there's motion based on sensitivity threshold
     detected = any(cv2.contourArea(c) > SENSITIVITY_THRESHOLD for c in contours)
@@ -91,9 +85,6 @@ while True:
     cv2.putText(frame, indicator_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1,
                 (0, 0, 255) if recording else (0, 255, 0), 2)
     cv2.imshow('Camera Preview', frame)
-
-    # Update previous frame
-    previous_frame = gray_frame.copy()
 
     # Break loop on 'q' key press
     if cv2.waitKey(1) & 0xFF == ord('q'):
