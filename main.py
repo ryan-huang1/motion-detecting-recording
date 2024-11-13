@@ -2,6 +2,7 @@ import cv2
 import time
 import numpy as np
 import os
+from picamera2 import Picamera2, Preview
 
 # Parameters
 SENSITIVITY_THRESHOLD = 300  # Lower value increases sensitivity
@@ -22,29 +23,42 @@ motion_end_time = None
 motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
 output_file = None
 
-# Initialize Video Capture (use 0 for default camera)
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
+# Initialize Picamera2
+picam2 = Picamera2()
 
-# Define codec and create VideoWriter object for MP4
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+# Configure the camera
+video_config = picam2.create_video_configuration(
+    main={"size": (frame_width, frame_height)},
+    lores={"size": (motion_frame_width, motion_frame_height)},
+    display="lores"
+)
+picam2.configure(video_config)
+
+# Start the camera
+picam2.start()
 
 # Create background subtractor
 fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
 
+# Define codec and create VideoWriter object for MP4
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
 # Main loop
 while True:
-    ret, frame = cap.read()
-    if not ret:
+    # Capture frame
+    frame = picam2.capture_array()
+    if frame is None:
         print("Failed to grab frame.")
         break
 
-    # Resize frame for motion detection to reduce computation
+    # Resize frame for motion detection
     motion_frame = cv2.resize(frame, (motion_frame_width, motion_frame_height))
 
+    # Convert to grayscale for motion detection
+    gray_motion_frame = cv2.cvtColor(motion_frame, cv2.COLOR_BGR2GRAY)
+
     # Apply background subtraction
-    fgmask = fgbg.apply(motion_frame)
+    fgmask = fgbg.apply(gray_motion_frame)
 
     # Find contours
     contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -91,7 +105,7 @@ while True:
         break
 
 # Release resources
-cap.release()
+picam2.stop()
 if recording:
     out.release()
 cv2.destroyAllWindows()
