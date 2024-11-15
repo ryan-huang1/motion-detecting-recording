@@ -1,12 +1,13 @@
 from picamera2 import Picamera2
 from libcamera import Transform
 from picamera2.encoders import H264Encoder
-from picamera2.outputs import FileOutput
+from picamera2.outputs import Output
 from libcamera import controls
 import time
 import numpy as np
 import os
 from datetime import datetime
+from collections import deque
 
 # Parameters
 PIXEL_DIFF_THRESHOLD = 25  # Minimum pixel intensity difference to count as "changed"
@@ -15,6 +16,7 @@ MOTION_BUFFER_DURATION = 1.0  # Minimum duration (in seconds) to keep "motion de
 high_res_width, high_res_height = 1920, 1080  # High-resolution for saving
 motion_frame_width, motion_frame_height = 320, 240  # Low resolution for motion detection
 record_duration_after_motion = 10  # seconds
+pre_motion_recording_duration = 10  # seconds
 output_folder = "motion_videos"  # Folder to save videos
 cooldown_duration = 5  # Cooldown duration in seconds
 
@@ -25,6 +27,42 @@ flip_vertical = True    # Set to True to flip the image vertically
 # Ensure output folder exists
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
+
+# Custom Circular Buffer Output Class
+class CircularBufferOutput(Output):
+    def __init__(self, max_duration, frame_interval):
+        super().__init__()
+        self.max_duration = max_duration  # in seconds
+        self.frame_interval = frame_interval  # time between frames
+        self.max_frames = int(max_duration / frame_interval)
+        self.frames = deque()
+        self.recording = False
+        self.file = None
+
+    def outputframe(self, frame, keyframe=True, timestamp=None):
+        self.frames.append((frame, keyframe))
+        if len(self.frames) > self.max_frames:
+            self.frames.popleft()
+        if self.recording and self.file:
+            self.file.write(frame)
+
+    def start_recording(self, file_path):
+        self.file = open(file_path, 'wb')
+        # Find the last keyframe in the buffer
+        last_keyframe_index = 0
+        for i, (frame, keyframe) in enumerate(self.frames):
+            if keyframe:
+                last_keyframe_index = i
+        # Write frames from last keyframe to the end
+        for frame, keyframe in list(self.frames)[last_keyframe_index:]:
+            self.file.write(frame)
+        self.recording = True
+
+    def stop_recording(self):
+        if self.file:
+            self.file.close()
+            self.file = None
+        self.recording = False
 
 # Initialize Picamera2
 picam2 = Picamera2()
@@ -40,17 +78,23 @@ video_config = picam2.create_video_configuration(
 )
 picam2.configure(video_config)
 
-# Start the camera
-picam2.start(show_preview=True)
+# Create the encoder with keyframe interval
+encoder = H264Encoder(bitrate=10000000)
+encoder.codec_controls = {"intra_period": 25}  # Keyframe interval of 25 frames
+
+# Create the circular buffer output
+frame_interval = 0.1  # Assuming 10 fps
+circular_output = CircularBufferOutput(max_duration=pre_motion_recording_duration, frame_interval=frame_interval)
+
+# Start the camera and start recording to the circular buffer
+picam2.start_recording(encoder, circular_output)
+print("Recording started to circular buffer.")
 
 motion_detected = False
 recording = False
 motion_end_time = None
 motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
 cooldown_end_time = 0  # Initialize cooldown period to zero
-output_file = None
-encoder = None
-output = None
 
 try:
     while True:
@@ -94,28 +138,18 @@ try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_file = os.path.join(output_folder, f"motion_{timestamp}.h264")
             print(f"Recording started: {output_file}")
-            encoder = H264Encoder(bitrate=10000000)  # 10 Mbps bitrate
-            output = FileOutput(output_file)
-            picam2.start_recording(encoder, output)
+            circular_output.start_recording(output_file)
             motion_end_time = current_time + record_duration_after_motion
 
         # Stop recording if motion has ceased for the specified time
         if recording and current_time > motion_end_time:
             print(f"Stopping recording: {output_file}")
-            picam2.stop_recording()
+            circular_output.stop_recording()
             recording = False
-            time.sleep(0.1)  # Short delay to allow the camera to stabilize
-
-            # Reset encoder and output resources after stopping
-            encoder = None
-            output = None
 
             # Set cooldown period after stopping recording
             cooldown_end_time = current_time + cooldown_duration
-
-            # Ensure preview continues smoothly
-            picam2.start(show_preview=True)
-            print("Preview resumed with cooldown")
+            print("Recording resumed to circular buffer.")
 
         # Update for the next frame comparison
         last_frame = motion_frame
@@ -126,8 +160,8 @@ try:
 except KeyboardInterrupt:
     pass
 finally:
-    # Stop preview and camera
+    # Stop recording and camera
     if recording:
-        picam2.stop_recording()
-    picam2.stop_preview()
+        circular_output.stop_recording()
+    picam2.stop_recording()
     picam2.close()
