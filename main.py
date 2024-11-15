@@ -10,10 +10,10 @@ from datetime import datetime
 
 # Parameters
 PIXEL_DIFF_THRESHOLD = 25  # Minimum pixel intensity difference to count as "changed"
-SENSITIVITY = 500  # Number of changed pixels required to trigger motion
+SENSITIVITY = 300  # Number of changed pixels required to trigger motion
 MOTION_BUFFER_DURATION = 1.0  # Minimum duration (in seconds) to keep "motion detected" state
-frame_width, frame_height = 640, 480  # Capture resolution
-motion_frame_width, motion_frame_height = 320, 240  # Resolution for motion detection
+high_res_width, high_res_height = 1920, 1080  # High-resolution for saving
+motion_frame_width, motion_frame_height = 320, 240  # Low resolution for motion detection
 record_duration_after_motion = 10  # seconds
 output_folder = "motion_videos"  # Folder to save videos
 cooldown_duration = 5  # Cooldown duration in seconds
@@ -30,11 +30,11 @@ if not os.path.exists(output_folder):
 picam2 = Picamera2()
 picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
 
-# Configure the camera for both preview and motion detection frames
+# Configure the camera for high-resolution main and low-resolution lores streams
 transform = Transform(hflip=flip_horizontal, vflip=flip_vertical)
 video_config = picam2.create_video_configuration(
-    main={"size": (frame_width, frame_height)},
-    lores={"size": (motion_frame_width, motion_frame_height), "format": "YUV420"},
+    main={"size": (high_res_width, high_res_height)},  # High resolution for saved video
+    lores={"size": (motion_frame_width, motion_frame_height), "format": "YUV420"},  # Low-res for motion detection
     display="lores",
     transform=transform
 )
