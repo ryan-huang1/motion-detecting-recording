@@ -10,124 +10,141 @@ from datetime import datetime
 
 # Parameters
 PIXEL_DIFF_THRESHOLD = 25  # Minimum pixel intensity difference to count as "changed"
-SENSITIVITY = 300  # Number of changed pixels required to trigger motion
-MOTION_BUFFER_DURATION = 1.0  # Minimum duration (in seconds) to keep "motion detected" state
-high_res_width, high_res_height = 1920, 1080  # High-resolution for saving
-motion_frame_width, motion_frame_height = 320, 240  # Low resolution for motion detection
-record_duration_after_motion = 10  # seconds
-output_folder = "motion_videos"  # Folder to save videos
-cooldown_duration = 5  # Cooldown duration in seconds
+SENSITIVITY = 50  # Number of changed pixels required to trigger motion
+MOTION_BUFFER_DURATION = 1.0  # Duration to keep "motion detected" state after motion ceases
+HIGH_RES_WIDTH, HIGH_RES_HEIGHT = 1920, 1080  # High-resolution for saving
+MOTION_FRAME_WIDTH, MOTION_FRAME_HEIGHT = 320, 240  # Low resolution for motion detection
+RECORD_DURATION_AFTER_MOTION = 10  # Seconds to keep recording after motion stops
+OUTPUT_FOLDER = "motion_videos"  # Folder to save videos
+COOLDOWN_DURATION = 5  # Cooldown duration in seconds
 
 # Flip configuration
-flip_horizontal = True  # Set to True to flip the image horizontally
-flip_vertical = True    # Set to True to flip the image vertically
+FLIP_HORIZONTAL = True  # Set to True to flip the image horizontally
+FLIP_VERTICAL = True    # Set to True to flip the image vertically
 
 # Ensure output folder exists
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
+if not os.path.exists(OUTPUT_FOLDER):
+    os.makedirs(OUTPUT_FOLDER)
 
 # Initialize Picamera2
 picam2 = Picamera2()
 picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
 
 # Configure the camera for high-resolution main and low-resolution lores streams
-transform = Transform(hflip=flip_horizontal, vflip=flip_vertical)
+transform = Transform(hflip=FLIP_HORIZONTAL, vflip=FLIP_VERTICAL)
 video_config = picam2.create_video_configuration(
-    main={"size": (high_res_width, high_res_height)},  # High resolution for saved video
-    lores={"size": (motion_frame_width, motion_frame_height), "format": "YUV420"},  # Low-res for motion detection
+    main={"size": (HIGH_RES_WIDTH, HIGH_RES_HEIGHT)},  # High resolution for saved video
+    lores={"size": (MOTION_FRAME_WIDTH, MOTION_FRAME_HEIGHT), "format": "YUV420"},  # Low-res for motion detection
     display="lores",
     transform=transform
 )
 picam2.configure(video_config)
 
-# Start the camera
+# Start the camera with preview
 picam2.start(show_preview=True)
 
+# Initialize state variables
 motion_detected = False
 recording = False
-motion_end_time = None
-motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
-cooldown_end_time = 0  # Initialize cooldown period to zero
+motion_end_time = 0  # Time when to stop recording
+motion_buffer_end_time = 0  # Time until which motion is considered active
+cooldown_end_time = 0  # Time when cooldown ends
 output_file = None
 encoder = None
 output = None
 
 try:
     while True:
+        current_time = time.time()
+
         # Capture frame for motion detection
         frame = picam2.capture_array("lores")  # Capture from the low-resolution stream
 
-        # Check if the captured frame has color channels
+        # Convert to grayscale
         if frame.ndim == 3 and frame.shape[2] == 3:
-            # Convert to grayscale by averaging the color channels
             motion_frame = np.mean(frame, axis=2).astype(np.uint8)
         else:
-            # If already grayscale, use the frame as is
             motion_frame = frame
 
         # Initialize last_frame if it's the first loop
         if 'last_frame' not in locals():
             last_frame = motion_frame
+            time.sleep(0.1)
+            # Initial status print
+            print(f"Motion: Not detected | Recording: {'Yes' if recording else 'No'}")
+            continue  # Skip processing on the first frame
 
         # Calculate frame difference and threshold it
         frame_delta = np.abs(motion_frame.astype(np.int16) - last_frame.astype(np.int16))
         changed_pixels = np.sum(frame_delta > PIXEL_DIFF_THRESHOLD)
 
-        # Check if currently within the cooldown period
-        current_time = time.time()
+        # Determine if there's motion based on the count of changed pixels
         if current_time < cooldown_end_time:
-            # Skip motion detection during cooldown
+            # Ignore motion during cooldown
             motion_detected = False
         else:
-            # Determine if there's motion based on the count of changed pixels
             if changed_pixels > SENSITIVITY:
                 if not motion_detected:
                     print("Motion detected.")
                 motion_buffer_end_time = current_time + MOTION_BUFFER_DURATION
                 motion_detected = True
-            elif current_time > motion_buffer_end_time:
-                motion_detected = False
+            else:
+                if current_time > motion_buffer_end_time:
+                    motion_detected = False
 
         # Start recording if motion is detected and not currently recording
         if motion_detected and not recording:
             recording = True
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = os.path.join(output_folder, f"motion_{timestamp}.h264")
+            output_file = os.path.join(OUTPUT_FOLDER, f"motion_{timestamp}.h264")
             print(f"Recording started: {output_file}")
             encoder = H264Encoder(bitrate=10000000)  # 10 Mbps bitrate
             output = FileOutput(output_file)
             picam2.start_recording(encoder, output)
-            motion_end_time = current_time + record_duration_after_motion
+            motion_end_time = current_time + RECORD_DURATION_AFTER_MOTION
 
-        # Stop recording if motion has ceased for the specified time
-        if recording and current_time > motion_end_time:
-            print(f"Stopping recording: {output_file}")
-            picam2.stop_recording()
-            recording = False
-            time.sleep(0.1)  # Short delay to allow the camera to stabilize
+        # If recording is ongoing
+        if recording:
+            if motion_detected:
+                # Extend recording time
+                motion_end_time = current_time + RECORD_DURATION_AFTER_MOTION
+            else:
+                # Stop recording if motion has ceased and recording time has elapsed
+                if current_time > motion_end_time:
+                    print(f"Stopping recording: {output_file}")
+                    picam2.stop_recording()
+                    recording = False
+                    encoder = None
+                    output = None
+                    cooldown_end_time = current_time + COOLDOWN_DURATION
+                    print("Entered cooldown period.")
 
-            # Reset encoder and output resources after stopping
-            encoder = None
-            output = None
-
-            # Set cooldown period after stopping recording
-            cooldown_end_time = current_time + cooldown_duration
-
-            # Ensure preview continues smoothly
-            picam2.start(show_preview=True)
-            print("Preview resumed with cooldown")
+                    # Reconfigure and restart the camera
+                    picam2.stop()
+                    picam2.configure(video_config)
+                    picam2.start(show_preview=True)
+                    print("Camera reconfigured and preview resumed.")
 
         # Update for the next frame comparison
         last_frame = motion_frame
 
-        # Add a delay to prevent high CPU usage
+        # Print current status
+        motion_status = "Detected" if motion_detected else "Not detected"
+        recording_status = "Yes" if recording else "No"
+        print(f"Motion: {motion_status} | Recording: {recording_status}")
+
+        # Add a short delay to prevent high CPU usage
         time.sleep(0.1)
 
 except KeyboardInterrupt:
-    pass
+    print("Interrupted by user.")
+
 finally:
-    # Stop preview and camera
-    if recording:
-        picam2.stop_recording()
-    picam2.stop_preview()
-    picam2.close()
+        # Stop recording if it's still ongoing
+        if recording:
+            picam2.stop_recording()
+            print(f"Recording stopped: {output_file}")
+        # Stop preview and close camera
+        picam2.stop_preview()
+        picam2.close()
+        print("Camera closed.")
