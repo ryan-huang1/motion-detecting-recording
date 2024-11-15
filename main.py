@@ -1,32 +1,31 @@
-import cv2
+from picamera2 import Picamera2
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import FileOutput
+from libcamera import controls
 import time
 import numpy as np
 import os
-from picamera2 import Picamera2, Preview
+from datetime import datetime
 
 # Parameters
-SENSITIVITY_THRESHOLD = 300  # Lower value increases sensitivity
+PIXEL_DIFF_THRESHOLD = 25  # Minimum pixel intensity difference to count as "changed"
+SENSITIVITY = 500  # Number of changed pixels required to trigger motion
 MOTION_BUFFER_DURATION = 1.0  # Minimum duration (in seconds) to keep "motion detected" state
 frame_width, frame_height = 640, 480  # Capture resolution
 motion_frame_width, motion_frame_height = 320, 240  # Resolution for motion detection
-fps = 20
 record_duration_after_motion = 10  # seconds
 output_folder = "motion_videos"  # Folder to save videos
+cooldown_duration = 5  # Cooldown duration in seconds
 
 # Ensure output folder exists
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
 
-motion_detected = False
-recording = False
-motion_end_time = None
-motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
-output_file = None
-
 # Initialize Picamera2
 picam2 = Picamera2()
+picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
 
-# Configure the camera
+# Configure the camera for both preview and motion detection frames
 video_config = picam2.create_video_configuration(
     main={"size": (frame_width, frame_height)},
     lores={"size": (motion_frame_width, motion_frame_height)},
@@ -35,77 +34,88 @@ video_config = picam2.create_video_configuration(
 picam2.configure(video_config)
 
 # Start the camera
-picam2.start()
+picam2.start(show_preview=True)
 
-# Create background subtractor
-fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
+motion_detected = False
+recording = False
+motion_end_time = None
+motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
+cooldown_end_time = 0  # Initialize cooldown period to zero
+output_file = None
+encoder = None
+output = None
 
-# Define codec and create VideoWriter object for MP4
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+try:
+    while True:
+        # Capture frame for motion detection
+        frame = picam2.capture_array()
 
-# Main loop
-while True:
-    # Capture frame
-    frame = picam2.capture_array()
-    if frame is None:
-        print("Failed to grab frame.")
-        break
+        # Convert to grayscale for motion detection by averaging RGB values
+        motion_frame = np.mean(frame, axis=2).astype(np.uint8)
 
-    # Resize frame for motion detection
-    motion_frame = cv2.resize(frame, (motion_frame_width, motion_frame_height))
+        # Initialize last_frame if it's the first loop
+        if 'last_frame' not in locals():
+            last_frame = motion_frame
 
-    # Convert to grayscale for motion detection
-    gray_motion_frame = cv2.cvtColor(motion_frame, cv2.COLOR_BGR2GRAY)
+        # Calculate frame difference and threshold it
+        frame_delta = np.abs(motion_frame.astype(np.int16) - last_frame.astype(np.int16))
+        changed_pixels = np.sum(frame_delta > PIXEL_DIFF_THRESHOLD)
 
-    # Apply background subtraction
-    fgmask = fgbg.apply(gray_motion_frame)
+        # Check if currently within the cooldown period
+        current_time = time.time()
+        if current_time < cooldown_end_time:
+            # Skip motion detection during cooldown
+            motion_detected = False
+        else:
+            # Determine if there's motion based on the count of changed pixels
+            if changed_pixels > SENSITIVITY:
+                if not motion_detected:
+                    print("Motion detected.")
+                motion_buffer_end_time = current_time + MOTION_BUFFER_DURATION
+                motion_detected = True
+            elif current_time > motion_buffer_end_time:
+                motion_detected = False
 
-    # Find contours
-    contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Determine if there's motion based on sensitivity threshold
-    detected = any(cv2.contourArea(c) > SENSITIVITY_THRESHOLD for c in contours)
-
-    # Update motion buffer timing
-    current_time = time.time()
-    if detected:
-        motion_buffer_end_time = current_time + MOTION_BUFFER_DURATION
-        motion_detected = True
-    elif current_time > motion_buffer_end_time:
-        motion_detected = False
-
-    # Start recording if motion is detected
-    if motion_detected:
-        if not recording:
+        # Start recording if motion is detected and not currently recording
+        if motion_detected and not recording:
             recording = True
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            output_file = os.path.join(output_folder, f"motion_{timestamp}.mp4")
-            out = cv2.VideoWriter(output_file, fourcc, fps, (frame_width, frame_height))
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = os.path.join(output_folder, f"motion_{timestamp}.h264")
             print(f"Recording started: {output_file}")
-        motion_end_time = current_time + record_duration_after_motion
+            encoder = H264Encoder(bitrate=10000000)  # 10 Mbps bitrate
+            output = FileOutput(output_file)
+            picam2.start_recording(encoder, output)
+            motion_end_time = current_time + record_duration_after_motion
 
-    # Stop recording if motion has ceased for the specified time
-    if recording and current_time > motion_end_time:
-        recording = False
-        out.release()
-        print(f"Recording stopped: {output_file}")
+        # Stop recording if motion has ceased for the specified time
+        if recording and current_time > motion_end_time:
+            print(f"Stopping recording: {output_file}")
+            picam2.stop_recording()
+            recording = False
+            time.sleep(0.1)  # Short delay to allow the camera to stabilize
 
-    # Write frame to video if recording
+            # Reset encoder and output resources after stopping
+            encoder = None
+            output = None
+
+            # Set cooldown period after stopping recording
+            cooldown_end_time = current_time + cooldown_duration
+
+            # Ensure preview continues smoothly
+            picam2.start(show_preview=True)
+            print("Preview resumed with cooldown")
+
+        # Update for the next frame comparison
+        last_frame = motion_frame
+
+        # Add a delay to prevent high CPU usage
+        time.sleep(0.1)
+
+except KeyboardInterrupt:
+    pass
+finally:
+    # Stop preview and camera
     if recording:
-        out.write(frame)
-
-    # Display preview with motion and recording indicators
-    indicator_text = f"Motion: {'Yes' if motion_detected else 'No'} | Recording: {'Yes' if recording else 'No'}"
-    cv2.putText(frame, indicator_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                (0, 0, 255) if recording else (0, 255, 0), 2)
-    cv2.imshow('Camera Preview', frame)
-
-    # Break loop on 'q' key press
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Release resources
-picam2.stop()
-if recording:
-    out.release()
-cv2.destroyAllWindows()
+        picam2.stop_recording()
+    picam2.stop_preview()
+    picam2.close()
