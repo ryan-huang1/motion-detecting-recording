@@ -1,4 +1,5 @@
 from picamera2 import Picamera2
+from libcamera import Transform
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FileOutput
 from libcamera import controls
@@ -17,6 +18,10 @@ record_duration_after_motion = 10  # seconds
 output_folder = "motion_videos"  # Folder to save videos
 cooldown_duration = 5  # Cooldown duration in seconds
 
+# Flip configuration
+flip_horizontal = True  # Set to True to flip the image horizontally
+flip_vertical = True    # Set to True to flip the image vertically
+
 # Ensure output folder exists
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
@@ -26,10 +31,12 @@ picam2 = Picamera2()
 picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
 
 # Configure the camera for both preview and motion detection frames
+transform = Transform(hflip=flip_horizontal, vflip=flip_vertical)
 video_config = picam2.create_video_configuration(
     main={"size": (frame_width, frame_height)},
-    lores={"size": (motion_frame_width, motion_frame_height)},
-    display="lores"
+    lores={"size": (motion_frame_width, motion_frame_height), "format": "YUV420"},
+    display="lores",
+    transform=transform
 )
 picam2.configure(video_config)
 
@@ -48,10 +55,15 @@ output = None
 try:
     while True:
         # Capture frame for motion detection
-        frame = picam2.capture_array()
+        frame = picam2.capture_array("lores")  # Capture from the low-resolution stream
 
-        # Convert to grayscale for motion detection by averaging RGB values
-        motion_frame = np.mean(frame, axis=2).astype(np.uint8)
+        # Check if the captured frame has color channels
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            # Convert to grayscale by averaging the color channels
+            motion_frame = np.mean(frame, axis=2).astype(np.uint8)
+        else:
+            # If already grayscale, use the frame as is
+            motion_frame = frame
 
         # Initialize last_frame if it's the first loop
         if 'last_frame' not in locals():
