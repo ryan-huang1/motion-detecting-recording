@@ -1,22 +1,24 @@
+import time
+import numpy as np
+import os
+from datetime import datetime
 from picamera2 import Picamera2
 from libcamera import Transform
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FileOutput
 from libcamera import controls
-import time
-import numpy as np
-import os
-from datetime import datetime
 
 # Parameters
-PIXEL_DIFF_THRESHOLD = 25  # Minimum pixel intensity difference to count as "changed"
-SENSITIVITY = 300  # Number of changed pixels required to trigger motion
+PIXEL_DIFF_THRESHOLD = 20  # Minimum pixel intensity difference to count as "changed"
+SENSITIVITY = 100  # Number of changed pixels required to trigger motion
 MOTION_BUFFER_DURATION = 1.0  # Minimum duration (in seconds) to keep "motion detected" state
 high_res_width, high_res_height = 1920, 1080  # High-resolution for saving
 motion_frame_width, motion_frame_height = 320, 240  # Low resolution for motion detection
 record_duration_after_motion = 10  # seconds
 output_folder = "motion_videos"  # Folder to save videos
 cooldown_duration = 5  # Cooldown duration in seconds
+reset_interval = 300  # Full model reset every 300 seconds
+learning_rate = 0.01  # Incremental update learning rate for background
 
 # Flip configuration
 flip_horizontal = True  # Set to True to flip the image horizontally
@@ -46,8 +48,9 @@ picam2.start(show_preview=True)
 motion_detected = False
 recording = False
 motion_end_time = None
-motion_buffer_end_time = 0  # Initialize to zero to avoid NoneType issues
-cooldown_end_time = 0  # Initialize cooldown period to zero
+motion_buffer_end_time = 0
+cooldown_end_time = 0
+last_reset_time = time.time()
 output_file = None
 encoder = None
 output = None
@@ -69,14 +72,23 @@ try:
         if 'last_frame' not in locals():
             last_frame = motion_frame
 
+        # Perform a periodic full reset of the background model
+        current_time = time.time()
+        if current_time - last_reset_time > reset_interval:
+            print("Resetting background model...")
+            last_frame = motion_frame.copy()
+            last_reset_time = current_time
+
+        # Incrementally update the background model
+        last_frame = (1 - learning_rate) * last_frame + learning_rate * motion_frame
+        last_frame = last_frame.astype(np.uint8)
+
         # Calculate frame difference and threshold it
         frame_delta = np.abs(motion_frame.astype(np.int16) - last_frame.astype(np.int16))
         changed_pixels = np.sum(frame_delta > PIXEL_DIFF_THRESHOLD)
 
         # Check if currently within the cooldown period
-        current_time = time.time()
         if current_time < cooldown_end_time:
-            # Skip motion detection during cooldown
             motion_detected = False
         else:
             # Determine if there's motion based on the count of changed pixels
@@ -116,9 +128,6 @@ try:
             # Ensure preview continues smoothly
             picam2.start(show_preview=True)
             print("Preview resumed with cooldown")
-
-        # Update for the next frame comparison
-        last_frame = motion_frame
 
         # Add a delay to prevent high CPU usage
         time.sleep(0.1)
