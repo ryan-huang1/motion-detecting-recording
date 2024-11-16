@@ -7,6 +7,10 @@ import time
 import numpy as np
 import os
 from datetime import datetime
+import sys
+
+# Check if running from systemd
+RUNNING_FROM_SYSTEMD = bool(os.getenv('INVOCATION_ID'))  # This env var is present when running from systemd
 
 # Parameters
 PIXEL_DIFF_THRESHOLD = 25  # Minimum pixel intensity difference to count as "changed"
@@ -21,6 +25,11 @@ COOLDOWN_DURATION = 5  # Cooldown duration in seconds
 # Flip configuration
 FLIP_HORIZONTAL = True  # Set to True to flip the image horizontally
 FLIP_VERTICAL = True    # Set to True to flip the image vertically
+
+def log(message):
+    """Print only if not running from systemd"""
+    if not RUNNING_FROM_SYSTEMD:
+        print(message)
 
 # Ensure output folder exists
 if not os.path.exists(OUTPUT_FOLDER):
@@ -40,8 +49,8 @@ video_config = picam2.create_video_configuration(
 )
 picam2.configure(video_config)
 
-# Start the camera with preview
-picam2.start(show_preview=True)
+# Start the camera with preview only if not running from systemd
+picam2.start(show_preview=not RUNNING_FROM_SYSTEMD)
 
 # Initialize state variables
 motion_detected = False
@@ -71,7 +80,7 @@ try:
             last_frame = motion_frame
             time.sleep(0.1)
             # Initial status print
-            print(f"Motion: Not detected | Recording: {'Yes' if recording else 'No'}")
+            log(f"Motion: Not detected | Recording: {'Yes' if recording else 'No'}")
             continue  # Skip processing on the first frame
 
         # Calculate frame difference and threshold it
@@ -85,7 +94,7 @@ try:
         else:
             if changed_pixels > SENSITIVITY:
                 if not motion_detected:
-                    print("Motion detected.")
+                    log("Motion detected.")
                 motion_buffer_end_time = current_time + MOTION_BUFFER_DURATION
                 motion_detected = True
             else:
@@ -97,7 +106,7 @@ try:
             recording = True
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_file = os.path.join(OUTPUT_FOLDER, f"motion_{timestamp}.h264")
-            print(f"Recording started: {output_file}")
+            log(f"Recording started: {output_file}")
             encoder = H264Encoder(bitrate=10000000)  # 10 Mbps bitrate
             output = FileOutput(output_file)
             picam2.start_recording(encoder, output)
@@ -111,19 +120,19 @@ try:
             else:
                 # Stop recording if motion has ceased and recording time has elapsed
                 if current_time > motion_end_time:
-                    print(f"Stopping recording: {output_file}")
+                    log(f"Stopping recording: {output_file}")
                     picam2.stop_recording()
                     recording = False
                     encoder = None
                     output = None
                     cooldown_end_time = current_time + COOLDOWN_DURATION
-                    print("Entered cooldown period.")
+                    log("Entered cooldown period.")
 
                     # Reconfigure and restart the camera
                     picam2.stop()
                     picam2.configure(video_config)
-                    picam2.start(show_preview=True)
-                    print("Camera reconfigured and preview resumed.")
+                    picam2.start(show_preview=not RUNNING_FROM_SYSTEMD)
+                    log("Camera reconfigured.")
 
         # Update for the next frame comparison
         last_frame = motion_frame
@@ -131,20 +140,19 @@ try:
         # Print current status
         motion_status = "Detected" if motion_detected else "Not detected"
         recording_status = "Yes" if recording else "No"
-        print(f"Motion: {motion_status} | Recording: {recording_status}")
+        log(f"Motion: {motion_status} | Recording: {recording_status}")
 
         # Add a short delay to prevent high CPU usage
         time.sleep(0.1)
 
 except KeyboardInterrupt:
-    print("Interrupted by user.")
+    log("Interrupted by user.")
 
 finally:
-        # Stop recording if it's still ongoing
-        if recording:
-            picam2.stop_recording()
-            print(f"Recording stopped: {output_file}")
-        # Stop preview and close camera
-        picam2.stop_preview()
-        picam2.close()
-        print("Camera closed.")
+    # Stop recording if it's still ongoing
+    if recording:
+        picam2.stop_recording()
+        log(f"Recording stopped: {output_file}")
+    # Close camera
+    picam2.close()
+    log("Camera closed.")
